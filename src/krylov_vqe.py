@@ -1,15 +1,16 @@
 from qiskit.circuit import QuantumCircuit
-from qiskit.algorithms import MinimumEigensolverResult
 from qiskit.quantum_info import Statevector
-import numpy as np
 
+import numpy as np
 import scipy.linalg as slg
 
 
+# TODO: Figure out why you don't get the VQE eigenstate from this circuit when
+#  using QASM instead of statevector simulator
 def intermediate_vqe_states(optimized_circuit: QuantumCircuit, depth_period=1, decompositions=1):
     """
     Extracts the intermediate statevectors from an optimzed VQE circuit by rebuilding the circuit step by step and
-    saving the Statevector at desired circuit depth increments
+    saving the Statevector at desired circuit depth increments. Importantly, this assumes the input state is all zeros
     :param optimized_circuit: The optimized circuit produced by VQE
     :param depth_period: The depth multiples at which the state vector is desired
     :param decompositions: The number of times to try decomposing the circuit into smaller blocks
@@ -29,16 +30,20 @@ def intermediate_vqe_states(optimized_circuit: QuantumCircuit, depth_period=1, d
     last_measured_depth = 0
 
     for instruction in optimized_circuit.data:
+        prev_circuit = new_circuit.copy()
         new_circuit.append(instruction[0], instruction[1], instruction[2])
+
+        prev_depth = prev_circuit.depth()
         current_depth = new_circuit.depth()
-        if current_depth - last_measured_depth >= depth_period:
-            state_vectors.append(Statevector.from_instruction(new_circuit))
-            last_measured_depth = current_depth
+
+        if current_depth > prev_depth and prev_depth - last_measured_depth >= depth_period:
+            state_vectors.append(Statevector.from_instruction(prev_circuit))
+            last_measured_depth = prev_depth
 
     # Add the final output of the VQE circuit to the list of statevectors
     state_vectors.append(Statevector.from_instruction(new_circuit))
 
-    if Statevector.from_instruction(optimized_circuit) != Statevector.from_instruction(new_circuit):
+    if Statevector.from_instruction(optimized_circuit) != state_vectors[-1]:
         print("Something went wrong, the final statevectors don't match.")
 
     return state_vectors
@@ -78,7 +83,6 @@ def generalized_eigenvalue_solver(hamiltonian, state_vectors, tol=1e-14):
     s_elems = sv @ np.diag(su) @ sv.conj().T
 
     evals = slg.eigh(h_elems, s_elems, eigvals_only=True)
-
     return evals
 
 
@@ -94,4 +98,4 @@ def krylov_vqe(hamiltonian, optimized_circuit: QuantumCircuit, depth_period=1, d
     state_vectors = intermediate_vqe_states(optimized_circuit, depth_period, decompositions)
     evals = generalized_eigenvalue_solver(hamiltonian, state_vectors)
 
-    return min(evals)
+    return min(evals.real)
