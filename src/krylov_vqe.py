@@ -3,99 +3,161 @@ from qiskit.quantum_info import Statevector
 
 import numpy as np
 import scipy.linalg as slg
+import random
+import itertools
 
 
-# TODO: Figure out why you don't get the VQE eigenstate from this circuit when
-#  using QASM instead of statevector simulator
-def intermediate_vqe_states(optimized_circuit: QuantumCircuit, depth_period=1, decompositions=1):
-    """
-    Extracts the intermediate statevectors from an optimzed VQE circuit by rebuilding the circuit step by step and
-    saving the Statevector at desired circuit depth increments. Importantly, this assumes the input state is all zeros
-    :param optimized_circuit: The optimized circuit produced by VQE
-    :param depth_period: The depth multiples at which the state vector is desired
-    :param decompositions: The number of times to try decomposing the circuit into smaller blocks
-    :return: A list of state vectors at each "barrier" instruction of the circuit
-    """
+class KrylovVQESolver:
+    def __init__(self, hamiltonian, optimized_circuit):
+        """
+        This class accepts a Hamiltonian and a circuit optimized by a VQE algorithm to produce the groundstate of the
+        Hamiltonian. By sampling intermediate statevectors obtained from the circuit and solving a generalized
+        eigenvalue problem in this larger subspace, this class improves the accuracy of VQE groundstate eigenvalue
+        estimations.
+        :param hamiltonian: The Hamiltonian under investigation
+        :param optimized_circuit: The circuit optimized by a VQE algorithm to produce the groundstate of the Hamiltonian
+        """
+        self.hamiltonian = hamiltonian
+        self.optimized_circuit = optimized_circuit
+        self.circuit_depth = self.optimized_circuit.depth()
 
-    new_circuit = QuantumCircuit(optimized_circuit.num_qubits, optimized_circuit.num_clbits)
+        self.intermediate_states = None
 
-    for ii in range(decompositions):
-        optimized_circuit = optimized_circuit.decompose()
+        self.tolerance = 1e-14
+        self.h_elems = None
+        self.s_elems = None
+        self.eigenvalues = None
+        self.minimum_eigenvalue = None
 
-    if depth_period > optimized_circuit.depth():
-        raise ValueError(f'The {depth_period=} cannot be larger than the depth of the optimized VQE'
-                         f' circuit={optimized_circuit.depth()}.')
+        if self.circuit_depth == 0:
+            raise ValueError("Parameter 'optimized_circuit' must be a QuantumCircuit"
+                             " object of depth greater than zero.")
 
-    state_vectors = []
-    last_measured_depth = 0
+    def solve_krylov_vqe(self, target_depths=None, method=None, num_states=None, num_shots=None):
+        if method is None and target_depths is None:
+            raise ValueError("Either 'method' or 'target_depths' must be specified to generate the states used for "
+                             "the Krylov VQE solution.")
 
-    for instruction in optimized_circuit.data:
-        prev_circuit = new_circuit.copy()
-        new_circuit.append(instruction[0], instruction[1], instruction[2])
+        elif method is not None and target_depths is not None:
+            raise ValueError("Both 'method' and 'target_depths' cannot be specified simultaneously.")
 
-        prev_depth = prev_circuit.depth()
-        current_depth = new_circuit.depth()
+        elif target_depths is not None:
+            state_vectors = self.generate_intermediate_states(target_depths)
+            self.eigenvalues = self.generalized_eigensolver(state_vectors)
+            self.minimum_eigenvalue = min(self.eigenvalues)
+            return self.minimum_eigenvalue
 
-        if current_depth > prev_depth and prev_depth - last_measured_depth >= depth_period:
-            state_vectors.append(Statevector.from_instruction(prev_circuit))
-            last_measured_depth = prev_depth
+        else:
+            if num_states is None:
+                raise ValueError("Need to specifiy parameter 'num_states' when 'method' is specified.")
 
-    # Add the final output of the VQE circuit to the list of statevectors
-    state_vectors.append(Statevector.from_instruction(new_circuit))
+            if method.lower() == 'even':
+                target_depths = list((int(x) for x in np.floor(np.linspace(0, self.circuit_depth,
+                                                                           num_states + 1))[1:-1]))
+                state_vectors = self.generate_intermediate_states(target_depths)
+                self.eigenvalues = self.generalized_eigensolver(state_vectors)
+                self.minimum_eigenvalue = min(self.eigenvalues)
+                return self.minimum_eigenvalue
 
-    if Statevector.from_instruction(optimized_circuit) != state_vectors[-1]:
-        print("Something went wrong, the final statevectors don't match.")
+            elif any((method.lower() == x for x in ('all_permutations', 'all', 'random'))):
+                combinations = list(itertools.combinations(list(range(self.circuit_depth)), num_states - 1))
 
-    return state_vectors
+                if method.lower() == 'random':
+                    if num_shots is None:
+                        raise ValueError(f"Must specify 'num_shots' if using the '{method}' method.")
+                    if num_shots > len(combinations):
+                        print("Parameter 'num_shots' is greater than the total number of possible combinations, "
+                              "reducing 'num_shots' to the total number of combinations.")
+                        num_shots = len(combinations)
+                    print(f'Calculating Krylov VQE eigenvalue for {num_shots} random combinations...')
+                else:
+                    num_shots = len(combinations)
+                    print(f'Calculating Krylov VQE eigenvalue for all {len(combinations)} combinations...')
 
+                min_evals = []
+                best_permutation = None
 
-def generalized_eigenvalue_solver(hamiltonian, state_vectors, tol=1e-14):
-    """
-    Solves the generalized eigenvalue problem of the hamiltonian projected into a finite subset of the Hilbert space.
-    The generalized eigenvalue problem is of the form H.x = ES.x, where H is the hamiltonian projected into the provided
-    state vectors, S is the overlap matrix of the state vectors, and E is the eigenvalue.
-    :param hamiltonian: Hamiltonian operator used in the VQE calculation
-    :param state_vectors: A list of intermediate state vectors obtained from the VQE-optimized circuit
-    :param tol: The accepted threshold for small eigenvalues of the overlap matrix. Anything smaller is set equal to tol
-    to avoid non-positive definite overlap matrices.
-    :return: The eigenvalues obtained from the generalized eigenvalue problem
-    """
-    n = len(state_vectors)
+                for ii, p in enumerate(random.sample(combinations, num_shots)):
+                    state_vectors = self.generate_intermediate_states(p)
+                    evals = self.generalized_eigensolver(state_vectors)
+                    min_evals.append(min(evals))
 
-    h_elems = np.zeros((n, n), dtype=complex)
-    s_elems = np.zeros((n, n), dtype=complex)
+                    if self.minimum_eigenvalue is None:
+                        self.minimum_eigenvalue = min(evals)
+                        best_permutation = p
+                    elif min(evals) < self.minimum_eigenvalue:
+                        self.minimum_eigenvalue = min(evals)
+                        best_permutation = p
 
-    for ii in range(n):
-        for jj in range(n):
-            h_elems[ii, jj] = state_vectors[ii].inner(hamiltonian.eval(state_vectors[jj]).primitive)
-            s_elems[ii, jj] = state_vectors[ii].inner(state_vectors[jj])
+                    print(f'Finished permutation {ii + 1}/{num_shots}. New minimum eval: {min(evals):.8f}'
+                          f' Best minimum eval: {self.minimum_eigenvalue:.8f}', end="\r")
+                print('\n')
+                return min_evals, best_permutation
 
-    # Ensuring the overlap matrix is positive-definite
-    su, sv = slg.eigh(a=s_elems)
+    def generate_intermediate_states(self, target_depths):
+        """
+        Extracts the intermediate statevectors from an optimzed VQE circuit by rebuilding the circuit step by step and
+        saving the Statevector at desired circuit depth increments.
+        Importantly, this method assumes the input state is all zeros.
+        :param target_depths: A list of integers denoting the circuit depths at which the intermediate statevectors
+        should be extracted
+        :return: A list of state vectors at each desired circuit depth
+        """
+        if any(((depth < 0 or depth > self.circuit_depth) for depth in target_depths)):
+            raise ValueError("No element of 'target_depths' can be larger than the circuit depth or less than zero")
 
-    for ii, u in enumerate(su):
-        if np.abs(u) <= tol:
-            su[ii] = tol
-        elif u < 0:
-            raise RuntimeError(f'Overlap matrix contains a large negative eigenvalue, cannot proceed.'
-                               f' Eigenvalue: {u}')
+        if any((depth == self.circuit_depth for depth in target_depths)):
+            print("The final output of the VQE circuit is always included in the list of intermediate statevectors,"
+                  "there is no need to include it explicitly in 'target_depths'.")
 
-    s_elems = sv @ np.diag(su) @ sv.conj().T
+        new_circuit = QuantumCircuit(self.optimized_circuit.num_qubits, self.optimized_circuit.num_clbits)
 
-    evals = slg.eigh(h_elems, s_elems, eigvals_only=True)
-    return evals
+        state_vectors = []
 
+        for instruction in self.optimized_circuit.data:
+            prev_circuit = new_circuit.copy()
+            new_circuit.append(instruction[0], instruction[1], instruction[2])
 
-def krylov_vqe(hamiltonian, optimized_circuit: QuantumCircuit, depth_period=1, decompositions=1):
-    """
-    Top-level function for solving a generalized eigenvalue problem generated from an optimized VQE circuit
-    :param hamiltonian: The Hamiltonian for which the VQE circuit produces the groundstate
-    :param optimized_circuit: The optimized circuit produced by VQE
-    :param depth_period:
-    :param decompositions: The number of times to try decomposing the circuit into smaller blocks
-    :return: The groundstate eigenvalue of the generalized eigenvalue problem
-    """
-    state_vectors = intermediate_vqe_states(optimized_circuit, depth_period, decompositions)
-    evals = generalized_eigenvalue_solver(hamiltonian, state_vectors)
+            prev_depth = prev_circuit.depth()
+            current_depth = new_circuit.depth()
 
-    return min(evals.real)
+            if current_depth > prev_depth and prev_depth in target_depths:
+                state_vectors.append(Statevector.from_instruction(prev_circuit))
+
+        # Add the final output of the VQE circuit to the list of statevectors
+        state_vectors.append(Statevector.from_instruction(new_circuit))
+
+        return state_vectors
+
+    def generalized_eigensolver(self, state_vectors):
+        """
+        Solves the generalized eigenvalue problem of the hamiltonian projected into a finite subset of the Hilbert
+        space. The generalized eigenvalue problem is of the form H.x = ES.x, where H is the hamiltonian projected into
+        the provided state vectors, S is the overlap matrix of the state vectors, and E is the eigenvalue.
+        :param state_vectors: A list of intermediate state vectors obtained from the VQE-optimized circuit
+        :return: The eigenvalues obtained from the generalized eigenvalue problem
+        """
+        n = len(state_vectors)
+
+        self.h_elems = np.zeros((n, n), dtype=complex)
+        self.s_elems = np.zeros((n, n), dtype=complex)
+
+        for ii in range(n):
+            for jj in range(n):
+                self.h_elems[ii, jj] = state_vectors[ii].inner(self.hamiltonian.eval(state_vectors[jj]).primitive)
+                self.s_elems[ii, jj] = state_vectors[ii].inner(state_vectors[jj])
+
+        # Ensuring the overlap matrix is positive-definite
+        su, sv = slg.eigh(a=self.s_elems)
+
+        for ii, u in enumerate(su):
+            if np.abs(u) <= self.tolerance:
+                su[ii] = self.tolerance
+            elif u < 0:
+                raise RuntimeError(f'Overlap matrix contains a large negative eigenvalue, cannot proceed.'
+                                   f' Eigenvalue: {u}')
+
+        self.s_elems = sv @ np.diag(su) @ sv.conj().T
+
+        evals = slg.eigh(self.h_elems, self.s_elems, eigvals_only=True)
+        return evals

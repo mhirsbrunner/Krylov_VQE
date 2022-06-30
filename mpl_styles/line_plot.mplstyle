@@ -1,0 +1,25 @@
+# Font Properties
+font.family : Times New Roman
+mathtext.fontset : stix
+font.size : 20
+
+# Lines Properties
+lines.linewidth : 2
+
+# Axes Properties
+axes.linewidth : 2
+axes.xmargin : 0.05
+
+# Ticks Properties
+xtick.top : False
+xtick.bottom : True
+xtick.direction : out
+xtick.major.size : 8
+xtick.major.width : 2
+xtick.major.pad : 10
+
+ytick.left : True
+ytick.direction : out
+ytick.major.size : 8
+ytick.major.width : 2
+ytick.major.pad : 10
