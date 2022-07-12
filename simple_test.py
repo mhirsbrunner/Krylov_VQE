@@ -29,7 +29,7 @@ hamiltonian = (Z ^ Z ^ Y) - (X ^ Y ^ Z)
 
 # Find the exact solution for the grounstate eigenvalue
 exact_solver = NumPyMinimumEigensolver()
-exact_groundstate_energy = exact_solver.compute_minimum_eigenvalue(hamiltonian).eigenvalue
+exact_groundstate_energy = exact_solver.compute_minimum_eigenvalue(hamiltonian).eigenvalue.real
 print(f'Exact groundstate eigenvalue: {exact_groundstate_energy:.4f}')
 
 # VQE ansatz definition
@@ -108,30 +108,5 @@ print(
     f'Krylov Eigenvalue error: {100 * np.abs(krylov_diff / exact_groundstate_energy):.4e}%')
 
 # %% Plot Krylov results for every possible combination of statevectors
-num_states = np.arange(1, depth + 2)
-
-krylov_eigenvalues = []
-krylov_errors = []
-krylov_stds = []
-
-for ii in num_states:
-    result = krylov_solver.solve_krylov_vqe(method='all', num_states=ii)
-    vals = result[0]
-    errs = 100 * np.abs((vals - exact_groundstate_energy) / exact_groundstate_energy)
-    mean_err = np.mean(errs)
-    std = np.std(errs)
-
-    krylov_eigenvalues.append(vals)
-    krylov_errors.append(mean_err)
-    krylov_stds.append(std)
-
-# %%
-plt.style.use(mpl_styles_dir / 'line_plot.mplstyle')
-fig, ax = plt.subplots(figsize=(9, 6))
-
-ax.errorbar(num_states, krylov_errors, yerr=krylov_stds, fmt='o')
-ax.set_xlabel('# states')
-ax.set_ylabel('error (%)')
-
-plt.tight_layout()
-plt.savefig(fig_dir / 'simple_test_statistics.png')
+krylov_solver.plot_error_vs_num_states(exact_groundstate_energy, 300, 5, log_thresh=1e-6,
+                                       fig_fname='simple_test_error_vs_num_states')

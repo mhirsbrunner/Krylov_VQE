@@ -5,6 +5,7 @@ font.size : 20
 
 # Lines Properties
 lines.linewidth : 2
+lines.markersize : 10
 
 # Axes Properties
 axes.linewidth : 2
